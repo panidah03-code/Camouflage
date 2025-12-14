@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Stereogram Reveal (Animated)</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#000; overflow:hidden; }
+    canvas { width:100vw; height:100vh; display:block; touch-action:none; }
+
+    .ui{
+      position:fixed; left:14px; top:14px; z-index:10;
+      color:#e9eefc; font:13px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      background:rgba(12,16,24,.72);
+      border:1px solid rgba(255,255,255,.12);
+      border-radius:14px;
+      padding:12px;
+      backdrop-filter: blur(10px);
+      max-width: 360px;
+      user-select:none;
+    }
+    .ui strong{font-weight:800}
+    .row{display:flex; align-items:center; gap:10px; margin-top:10px; flex-wrap:wrap}
+    .row label{flex:1; opacity:.85}
+    input[type="range"]{width:160px}
+    select, button{
+      background: rgba(0,0,0,.25); color:#e9eefc;
+      border:1px solid rgba(255,255,255,.14);
+      padding:7px 10px; border-radius:10px;
+    }
+    button{cursor:pointer; font-weight:700}
+    .muted{opacity:.75}
+    .status{margin-top:10px; opacity:.85}
+    .pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:6px 10px; border-radius:999px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.22);
+      opacity:.9;
+    }
+    .pill input{transform:translateY(1px)}
+    .kbd{
+      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+      padding:1px 6px; border-radius:7px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.25);
+    }
+  </style>
+</head>
+<body>
+  <div class="ui" id="ui">
+    <div><strong>Stereogram Reveal Brush</strong> <span class="muted">(animated)</span></div>
+    <div class="muted">Paint to reveal the hidden object for viewers who can’t fuse the stereogram.</div>
+
+    <div class="row">
+      <label>Overlay</label>
+      <select id="mode">
+        <option value="silhouette" selected>Silhouette</option>
+        <option value="depth">Depth</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>Brush</label>
+      <input id="brush" type="range" min="10" max="220" value="90" />
+      <span id="brushVal" class="muted">90px</span>
+    </div>
+
+    <div class="row">
+      <label>Softness</label>
+      <input id="soft" type="range" min="0" max="1" step="0.05" value="0.55" />
+      <span id="softVal" class="muted">0.55</span>
+    </div>
+
+    <div class="row">
+      <span class="pill"><input id="animate" type="checkbox" checked><label for="animate">Animate</label></span>
+      <span class="pill"><input id="invert" type="checkbox"><label for="invert">Invert depth</label></span>
+      <span class="pill"><input id="holdShiftErase" type="checkbox" checked><label for="holdShiftErase">Shift = erase</label></span>
+    </div>
+
+    <div class="row">
+      <label>Glow</label>
+      <input id="glow" type="range" min="0" max="20" value="10" />
+      <span id="glowVal" class="muted">10</span>
+    </div>
+
+    <div class="row">
+      <label>Anim speed</label>
+      <input id="speed" type="range" min="0" max="2" step="0.05" value="1" />
+      <span id="speedVal" class="muted">1.00</span>
+    </div>
+
+    <div class="row" style="flex-wrap:wrap">
+      <button id="clear">Clear</button>
+      <button id="revealAll">Reveal all</button>
+      <button id="toggleUI">Hide UI</button>
+    </div>
+
+    <div class="status" id="status">Loading image…</div>
+    <div class="muted" style="margin-top:10px">
+      Shortcuts: <span class="kbd">R</span> clear, <span class="kbd">A</span> reveal all, hold <span class="kbd">Shift</span> to erase
+    </div>
+  </div>
+
+  <canvas id="view"></canvas>
+
+<script>
+(() => {
+  // 1) Put YOUR stereogram file name here:
+  const STEREOGRAM_SRC = "stereogram.jpg";
+
+  // 2) Decode params (tune if needed):
+  const PARAMS = {
+    downscale: 0.65,
+    minDisp: 6,
+    maxDisp: 80,
+    winRad: 5,
+    step: 1,
+    edgeThreshold: 45,
+    dilate: 1,
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const view = $("view");
+  const vctx = view.getContext("2d", { willReadFrequently:true });
+
+  const statusEl = $("status");
+  const modeEl = $("mode");
+  const brushEl = $("brush");
+  const brushVal = $("brushVal");
+  const softEl = $("soft");
+  const softVal = $("softVal");
+  const animateEl = $("animate");
+  const invertEl = $("invert");
+  const holdShiftEraseEl = $("holdShiftErase");
+  const glowEl = $("glow");
+  const glowVal = $("glowVal");
+  const speedEl = $("speed");
+  const speedVal = $("speedVal");
+  const clearBtn = $("clear");
+  const revealAllBtn = $("revealAll");
+  const toggleUIBtn = $("toggleUI");
+  const ui = $("ui");
+
+  const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+  const setStatus = (s) => statusEl.textContent = s;
+
+  // Full-res layers
+  const origC = document.createElement("canvas");
+  const origCtx = origC.getContext("2d", { willReadFrequently:true });
+
+  const overlayC = document.createElement("canvas");
+  const overlayCtx = overlayC.getContext("2d", { willReadFrequently:true });
+
+  const maskC = document.createElement("canvas");
+  const maskCtx = maskC.getContext("2d", { willReadFrequently:true });
+
+  const tmpC = document.createElement("canvas");
+  const tmpCtx = tmpC.getContext("2d", { willReadFrequently:true });
+
+  // Downscaled processing canvas
+  const procC = document.createElement("canvas");
+  const procCtx = procC.getContext("2d", { willReadFrequently:true });
+
+  let img = new Image();
+  let computed = false;
+
+  // Stored downscaled results
+  let stored = { W:0, H:0, disp:null, sil:null };
+
+  // UI live labels
+  const upd = () => {
+    brushVal.textContent = brushEl.value + "px";
+    softVal.textContent = Number(softEl.value).toFixed(2);
+    glowVal.textContent = glowEl.value;
+    speedVal.textContent = Number(speedEl.value).toFixed(2);
+  };
+  ["input","change"].forEach(ev=>{
+    brushEl.addEventListener(ev, upd);
+    softEl.addEventListener(ev, upd);
+    glowEl.addEventListener(ev, upd);
+    speedEl.addEventListener(ev, upd);
+  });
+  upd();
+
+  function resizeAllToImage(w,h){
+    [view, origC, overlayC, maskC, tmpC].forEach(c => { c.width = w; c.height = h; });
+    maskCtx.clearRect(0,0,w,h);
+  }
+
+  clearBtn.addEventListener("click", () => { maskCtx.clearRect(0,0,maskC.width,maskC.height); });
+  revealAllBtn.addEventListener("click", () => {
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = "source-over";
+    maskCtx.fillStyle = "rgba(255,255,255,1)";
+    maskCtx.fillRect(0,0,maskC.width,maskC.height);
+    maskCtx.restore();
+  });
+
+  toggleUIBtn.addEventListener("click", () => {
+    const hidden = ui.style.opacity === "0";
+    ui.style.opacity = hidden ? "1" : "0";
+    ui.style.pointerEvents = hidden ? "auto" : "none";
+    toggleUIBtn.textContent = hidden ? "Hide UI" : "Show UI";
+  });
+
+  modeEl.addEventListener("change", () => { if(computed) buildOverlayFromStored(); });
+  invertEl.addEventListener("change", () => { if(computed) buildOverlayFromStored(); });
+
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if(k === "r") maskCtx.clearRect(0,0,maskC.width,maskC.height);
+    if(k === "a") revealAllBtn.click();
+  });
+
+  // ----- Painting -----
+  let painting = false;
+  let last = null;
+  let shiftDown = false;
+  window.addEventListener("keydown", (e)=> { if(e.key === "Shift") shiftDown = true; });
+  window.addEventListener("keyup",   (e)=> { if(e.key === "Shift") shiftDown = false; });
+
+  function ptFromEvent(ev){
+    const rect = view.getBoundingClientRect();
+    const x = (ev.clientX - rect.left) * (view.width / rect.width);
+    const y = (ev.clientY - rect.top)  * (view.height / rect.height);
+    return {x,y};
+  }
+
+  function paintAt(x,y, erase){
+    if(!computed) return;
+    const r = parseFloat(brushEl.value);
+    const softness = parseFloat(softEl.value); // 0..1
+    const inner = r * (1 - softness);
+    const outer = r;
+
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = erase ? "destination-out" : "source-over";
+
+    const g = maskCtx.createRadialGradient(x,y, inner, x,y, outer);
+    if(erase){
+      g.addColorStop(0, "rgba(0,0,0,1)");
+      g.addColorStop(1, "rgba(0,0,0,0)");
+    } else {
+      g.addColorStop(0, "rgba(255,255,255,1)");
+      g.addColorStop(1, "rgba(255,255,255,0)");
+    }
+
+    maskCtx.fillStyle = g;
+    maskCtx.beginPath();
+    maskCtx.arc(x,y, outer, 0, Math.PI*2);
+    maskCtx.fill();
+    maskCtx.restore();
+  }
+
+  function paintLine(a,b, erase){
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const dist = Math.hypot(dx,dy);
+    const step = Math.max(1, parseFloat(brushEl.value) * 0.2);
+    const n = Math.ceil(dist / step);
+    for(let i=0;i<=n;i++){
+      const t = i/n;
+      paintAt(a.x + dx*t, a.y + dy*t, erase);
+    }
+  }
+
+  view.addEventListener("pointerdown", (ev) => {
+    painting = true;
+    view.setPointerCapture(ev.pointerId);
+    last = ptFromEvent(ev);
+    const erase = holdShiftEraseEl.checked && shiftDown;
+    paintAt(last.x, last.y, erase);
+  });
+  view.addEventListener("pointermove", (ev) => {
+    if(!painting) return;
+    const p = ptFromEvent(ev);
+    const erase = holdShiftEraseEl.checked && shiftDown;
+    if(last) paintLine(last, p, erase);
+    last = p;
+  });
+  view.addEventListener("pointerup", () => { painting=false; last=null; });
+  view.addEventListener("pointercancel", () => { painting=false; last=null; });
+
+  // ----- Animated render loop -----
+  function renderFrame(tMs){
+    if(!img.complete || !img.naturalWidth){
+      requestAnimationFrame(renderFrame);
+      return;
+    }
+
+    const t = tMs * 0.001;
+    const speed = Number(speedEl.value);
+    const glow = Number(glowEl.value);
+
+    // Base: original stereogram
+    vctx.clearRect(0,0,view.width,view.height);
+    vctx.drawImage(origC, 0, 0);
+
+    if(computed){
+      // tmp = overlay masked by reveal mask
+      tmpCtx.clearRect(0,0,tmpC.width,tmpC.height);
+      tmpCtx.drawImage(overlayC, 0, 0);
+      tmpCtx.globalCompositeOperation = "destination-in";
+      tmpCtx.drawImage(maskC, 0, 0);
+      tmpCtx.globalCompositeOperation = "source-over";
+
+      // Animation: subtle drift + pulsing intensity
+      const animOn = animateEl.checked;
+      const drift = animOn ? 2.0 : 0.0;
+      const ox = drift * Math.sin(t * 1.1 * speed);
+      const oy = drift * Math.cos(t * 0.9 * speed);
+      const pulse = animOn ? (0.78 + 0.18 * (0.5 + 0.5*Math.sin(t * 2.2 * speed))) : 0.85;
+
+      // 1) Glow pass (blurred)
+      if(glow > 0){
+        vctx.save();
+        vctx.translate(ox, oy);
+        vctx.globalAlpha = pulse * 0.75;
+        vctx.globalCompositeOperation = "screen";
+        vctx.filter = `blur(${glow}px)`;
+        vctx.drawImage(tmpC, 0, 0);
+        vctx.restore();
+      }
+
+      // 2) Sharp pass
+      vctx.save();
+      vctx.translate(-ox*0.4, -oy*0.4);
+      vctx.globalAlpha = pulse;
+      vctx.globalCompositeOperation = "screen";
+      vctx.filter = "none";
+      vctx.drawImage(tmpC, 0, 0);
+      vctx.restore();
+
+      // 3) Extra “moving highlight” for depth mode (cheap + pretty)
+      if(animOn && modeEl.value === "depth"){
+        vctx.save();
+        vctx.globalCompositeOperation = "overlay";
+        vctx.globalAlpha = 0.15 + 0.10*Math.sin(t*1.3*speed);
+
+        // moving diagonal gradient
+        const gx = (Math.sin(t*0.7*speed)*0.5 + 0.5) * view.width;
+        const gy = (Math.cos(t*0.6*speed)*0.5 + 0.5) * view.height;
+        const grad = vctx.createLinearGradient(gx-400, gy-300, gx+400, gy+300);
+        grad.addColorStop(0, "rgba(255,255,255,0)");
+        grad.addColorStop(0.5, "rgba(255,255,255,1)");
+        grad.addColorStop(1, "rgba(255,255,255,0)");
+        vctx.fillStyle = grad;
+        vctx.fillRect(0,0,view.width,view.height);
+
+        vctx.restore();
+      }
+    }
+
+    requestAnimationFrame(renderFrame);
+  }
+
+  // ----- Compute overlay once -----
+  async function computeOverlay() {
+    setStatus("Decoding depth from stereogram…");
+    await new Promise(r => requestAnimationFrame(r));
+
+    const scale = PARAMS.downscale;
+    const W = Math.max(1, Math.round(img.width * scale));
+    const H = Math.max(1, Math.round(img.height * scale));
+
+    procC.width = W; procC.height = H;
+    procCtx.clearRect(0,0,W,H);
+    procCtx.drawImage(img, 0, 0, W, H);
+
+    const src = procCtx.getImageData(0,0,W,H);
+    const d = src.data;
+
+    // grayscale
+    const gray = new Uint8Array(W*H);
+    for(let i=0,p=0;i<d.length;i+=4,p++){
+      gray[p] = (0.2126*d[i] + 0.7152*d[i+1] + 0.0722*d[i+2])|0;
+    }
+
+    const minD = PARAMS.minDisp, maxD = PARAMS.maxDisp;
+    const winR = PARAMS.winRad, step = PARAMS.step;
+
+    const bestDpx = new Uint16Array(W*H);
+    const disp = new Uint8ClampedArray(W*H);
+
+    const leftLimit = maxD + winR + 1;
+    const rightLimit = W - winR - 2;
+
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        const idx = y*W+x;
+        if(x < leftLimit || x > rightLimit){ bestDpx[idx] = 0; continue; }
+
+        let bestCost = 1e15;
+        let best = minD;
+
+        for(let shift=minD; shift<=maxD; shift+=step){
+          const x2 = x - shift;
+          let cost = 0;
+
+          for(let k=-winR;k<=winR;k++){
+            const a = gray[y*W + (x + k)];
+            const b = gray[y*W + (x2 + k)];
+            cost += Math.abs(a - b);
+          }
+          cost -= shift * 0.12; // tiny bias
+
+          if(cost < bestCost){ bestCost = cost; best = shift; }
+        }
+        bestDpx[idx] = best;
+      }
+
+      if(y % 16 === 0){
+        setStatus(`Decoding… ${Math.round(100*y/H)}%`);
+        await new Promise(r => requestAnimationFrame(r));
+      }
+    }
+
+    // normalize to 0..255
+    for(let i=0;i<bestDpx.length;i++){
+      const dpx = bestDpx[i];
+      let v = (dpx - minD) / (maxD - minD);
+      v = clamp(v, 0, 1);
+      if(invertEl.checked) v = 1 - v;
+      disp[i] = (v * 255) | 0;
+    }
+
+    setStatus("Extracting silhouette edges…");
+    await new Promise(r => requestAnimationFrame(r));
+
+    // Sobel edges on disparity
+    const edges = new Uint8ClampedArray(W*H);
+    const edgeTh = PARAMS.edgeThreshold;
+
+    const sobel = (x,y) => {
+      const xm1 = clamp(x-1,0,W-1), xp1 = clamp(x+1,0,W-1);
+      const ym1 = clamp(y-1,0,H-1), yp1 = clamp(y+1,0,H-1);
+
+      const a = disp[ym1*W + xm1], b = disp[ym1*W + x],  c = disp[ym1*W + xp1];
+      const d0= disp[y*W   + xm1],                     f = disp[y*W   + xp1];
+      const g = disp[yp1*W + xm1], h = disp[yp1*W + x],  i = disp[yp1*W + xp1];
+
+      const gx = (c + 2*f + i) - (a + 2*d0 + g);
+      const gy = (g + 2*h + i) - (a + 2*b + c);
+      return Math.sqrt(gx*gx + gy*gy);
+    };
+
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        edges[y*W+x] = sobel(x,y) > edgeTh ? 255 : 0;
+      }
+      if(y % 22 === 0){
+        setStatus(`Edges… ${Math.round(100*y/H)}%`);
+        await new Promise(r => requestAnimationFrame(r));
+      }
+    }
+
+    // dilation
+    let sil = edges;
+    const dil = PARAMS.dilate;
+    if(dil > 0){
+      const tmp = new Uint8ClampedArray(W*H);
+      for(let y=0;y<H;y++){
+        for(let x=0;x<W;x++){
+          let on = 0;
+          for(let dy=-dil; dy<=dil && !on; dy++){
+            const yy = y + dy; if(yy<0||yy>=H) continue;
+            for(let dx=-dil; dx<=dil; dx++){
+              const xx = x + dx; if(xx<0||xx>=W) continue;
+              if(edges[yy*W+xx] > 0){ on = 255; break; }
+            }
+          }
+          tmp[y*W+x] = on;
+        }
+      }
+      sil = tmp;
+    }
+
+    stored = { W, H, disp, sil };
+    buildOverlayFromStored();
+    computed = true;
+
+    setStatus("Ready. Paint to reveal. (Hold Shift to erase)");
+  }
+
+  function buildOverlayFromStored(){
+    const { W, H, disp, sil } = stored;
+    if(!disp || !sil) return;
+
+    const out = new ImageData(W, H);
+    const isDepth = (modeEl.value === "depth");
+
+    for(let p=0;p<W*H;p++){
+      const i = p*4;
+      if(isDepth){
+        const v = disp[p];
+        out.data[i] = out.data[i+1] = out.data[i+2] = v;
+        out.data[i+3] = 255;
+      } else {
+        out.data[i] = out.data[i+1] = out.data[i+2] = 255;
+        out.data[i+3] = sil[p] ? 255 : 0;
+      }
+    }
+
+    // Put small image, then upscale to full-res overlay
+    procC.width = W; procC.height = H;
+    procCtx.putImageData(out, 0, 0);
+
+    overlayCtx.clearRect(0,0,overlayC.width,overlayC.height);
+    overlayCtx.imageSmoothingEnabled = true;
+    overlayCtx.drawImage(procC, 0, 0, overlayC.width, overlayC.height);
+  }
+
+  // Load the single stereogram
+  img.onload = async () => {
+    resizeAllToImage(img.width, img.height);
+    origCtx.drawImage(img, 0, 0);
+    await computeOverlay();
+  };
+  img.onerror = () => setStatus(`Failed to load: ${STEREOGRAM_SRC} (check file path/name).`);
+  img.src = STEREOGRAM_SRC;
+
+  // Start animation loop immediately
+  requestAnimationFrame(renderFrame);
+})();
+</script>
+</body>
+</html>
